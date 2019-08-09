@@ -53,7 +53,7 @@ def connect_round_robin(machinelist, chain=False):
         nodescores.extend([(m/(msize*100+1.) + i/float(msize), (m, i)) for i in range(msize)])
     nodescores.sort()
     for n in range(len(nodescores)):
-        if not chain and n == len(nodescores)-1: 
+        if chain and n == len(nodescores)-1:
             break # not making a loop, so don't connect the last to the first
         m, i = nodescores[n][1]
         node = machinelist[m].nodes[i]
@@ -82,24 +82,23 @@ def connect_round_robin(machinelist, chain=False):
             time.sleep(0.1)
 
 def do_to_machines(machines, command, *args, **kwargs):
-    results = []
-    def helper(machine):
-        results.append(getattr(machine, command)(*args, **kwargs))
-    threads = [threading.Thread(target=helper, args=(machine,)) for machine in machines]
+    results = [None]*len(machines)
+    def helper(n):
+        results[n] = getattr(machines[n], command)(*args, **kwargs)
+    threads = [threading.Thread(target=helper, args=(i,)) for i in range(len(machines))]
     for thread in threads: thread.start()
     for thread in threads: thread.join()
     return results
-def do_to_nodes(machines, command, *args, **kwargs):
-    raise NotImplemented # finish me before use
-    results = []
-    def helper(machine):
-        results.append(getattr(machine, command)(*args, **kwargs))
-    threads = [threading.Thread(target=helper, args=(machine,)) for machine in machines]
+def do_to_nodes(nodes, command, *args, **kwargs):
+    results = [None]*len(nodes)
+    def helper(n):
+        results[n] = getattr(nodes[n], command)(*args, **kwargs)
+    threads = [threading.Thread(target=helper, args=(i,)) for i in range(len(nodes))]
     for thread in threads: thread.start()
     for thread in threads: thread.join()
     return results
 
-def sync(machines, wait=0.1, timeout=5.):
+def sync(machines, timeout=5., wait=0.1):
     stop_time = time.time() + timeout
     while time.time() <= stop_time:
         best_hash = [node.getbestblockhash() for machine in machines for node in machine.nodes]
@@ -110,8 +109,16 @@ def sync(machines, wait=0.1, timeout=5.):
         print("Machine %50s heights:" % str(machine), [node.getblock(node.getbestblockhash())['height'] for node in machine.nodes])
     raise AssertionError("Block sync timed out:{}".format(
         "".join("\n  {!r}".format(b) for b in best_hash)))
-
-
+def sync_nodes(nodes, timeout=5., wait=0.1):
+    stop_time = time.time() + timeout
+    while time.time() <= stop_time:
+        best_hash = [node.getbestblockhash() for node in nodes]
+        if best_hash.count(best_hash[0]) == len(best_hash):
+            return
+        time.sleep(wait)
+    print("Node heights: " % [node.getblock(node.getbestblockhash())['height'] for node in ([gen] + nodes)])
+    raise AssertionError("Block sync timed out:{}".format(
+        "".join("\n  {!r}".format(b) for b in best_hash)))
 def make_utxos(gen, machines, target):
     print("Running make_utxos")
     fanout = 500
@@ -126,56 +133,108 @@ def make_utxos(gen, machines, target):
     num_stages = -(-target // fanout) +1 # rounds up
     print(" - Fanout=%i, num_stages=%i" % (fanout, num_stages))
     gen.generate(101)
-    for machine in machines:
-        print("Machine %50s heights:" % str(machine), [node.getblock(node.getbestblockhash())['height'] for node in machine.nodes])
     time.sleep(0.2)
     gen.generate(1)
     sync(machines, timeout=10.)
     amount = str(Decimal(round(rootamount/(fanout+1) * 1e8)) / Decimal(1e8))
+    t1 = time.time()
     for node in flatnodes:
         if node == gen: # don't pollute wallet
             continue
         payments = {node.addresses[n]:amount for n in range(fanout)}
-        t1 = time.time()
         for stage in range(num_stages):
             gen.generate(1)
             gen.sendmany('', payments)
-        print("Balance is", gen.getbalance())
-        t2 = time.time(); print("Filling node wallets took %3.3f sec for stage %i:%i" % (t2-t1, flatnodes.index(node), stage))
-    for i in range(1+(target*len(flatnodes)//20000)):
+    t2 = time.time(); print(" - Filling node wallets took %3.3f sec" % (t2-t1))
+    for i in range(3):
         gen.generate(1)
         sync(machines, timeout=10)
-        blk = gen.getblock(gen.getbestblockhash(), 1)
-        print("Block has %i transactions and is %i bytes" % (len(blk['tx']), blk['size']))
     return amount
 
-def generate_spam(gen, machines, value, txcount, rate=1000):
-    spamnodes = [node for machine in machines for node in machine.nodes if not node == gen]
-    def helper(node, count):
-        batchsize = 100
-        t = time.time()
-        for i in range(0, count, batchsize):
-            now = time.time()
-            if i/(now-t) > rate:
-                time.sleep(i/rate - (now-t))
-            if not (i%1000):
-                print("Node %2i\ttx %5i\tat %3.3f sec\t(%3.0f tx/sec)" % (spamnodes.index(node)+1, i, time.time()-t, (i/(time.time()-t))))
-            add = node.addresses[i % len(node.addresses)]
-            try:
-                node.sendtoaddress(add, value, '', '', False, batchsize)
-            except http.client.CannotSendRequest: # hack to bypass lack of thread safety in http.client
-                node.sendtoaddress(add, value, '', '', False, batchsize)
-            except:
-                print("Node %i had a fatal error on tx %i:" % (spamnodes.index(node), i))
-                traceback.print_exc()
-                break
-    threads = [threading.Thread(target=helper, args=(node, txcount)) for node in spamnodes]
+# def generate_spam(gen, machines, value, txcount, rate=1000):
+#     spamnodes = [node for machine in machines for node in machine.nodes if not node == gen]
+#     def helper(node, count):
+#         batchsize = 100
+#         t = time.time()
+#         for i in range(0, count, batchsize):
+#             now = time.time()
+#             if i/(now-t) > rate:
+#                 time.sleep(i/rate - (now-t))
+#             if not (i%1000):
+#                 print("Node %2i\ttx %5i\tat %3.3f sec\t(%3.0f tx/sec)" % (spamnodes.index(node)+1, i, time.time()-t, (i/(time.time()-t))))
+#             add = node.addresses[i % len(node.addresses)]
+#             try:
+#                 node.sendtoaddress(add, value, '', '', False, batchsize)
+#             except http.client.CannotSendRequest: # hack to bypass lack of thread safety in http.client
+#                 node.sendtoaddress(add, value, '', '', False, batchsize)
+#             except:
+#                 print("Node %i had a fatal error on tx %i:" % (spamnodes.index(node), i))
+#                 traceback.print_exc()
+#                 break
+#     threads = [threading.Thread(target=helper, args=(node, txcount)) for node in spamnodes]
 
-    t0 = time.time()
+#     t0 = time.time()
+#     for thread in threads: thread.start()
+#     for thread in threads: thread.join()
+#     t1 = time.time(); print("Generating spam took %3.3f sec for %i tx (total %4.0f tx/sec)" \
+#         % (t1-t0, (len(spamnodes))*txcount, (len(spamnodes))*txcount/(t1-t0)))
+
+def remote_spam(nodes, value, txcount, rate=999999, wait=True):
+    print("Starting spam generation")
+    for node in nodes:
+        node.start_spam_batch(value, txcount, node.addresses, rate)
+    if not wait:
+        return 0
+    running, progress = zip(*do_to_nodes(nodes, 'get_spammer_status'))
+    last_progress = sum(progress)
+    i = 0
+    while any(running):
+        i += 1
+        time.sleep(1.)
+        running, progress = zip(*do_to_nodes(nodes, 'get_spammer_status'))
+        if not i%4:
+            print(" - Spam progress: " + ("{:>8} "*len(progress)).format(*progress),
+            " -- %4.0f tx/sec per node, %4.0f tx/sec total" % ((sum(progress)-last_progress)/4/len(nodes), (sum(progress)-last_progress)/4))
+            last_progress = sum(progress)
+    return sum(progress)
+
+def check_mempools(nodes, log=0):
+    results = [None]*len(nodes)
+    def helper(n):
+        success = False
+        for i in range(50):
+            try:
+                res = nodes[n].getmempoolinfo()
+                results[n] = res
+                break
+            except:
+                time.sleep(0.001)
+    threads = [threading.Thread(target=helper, args=(i,)) for i in range(len(nodes))]
     for thread in threads: thread.start()
     for thread in threads: thread.join()
-    t1 = time.time(); print("Generating spam took %3.3f sec for %i tx (total %4.0f tx/sec)" \
-        % (t1-t0, (len(spamnodes))*txcount, (len(spamnodes))*txcount/(t1-t0)))
+    if log: print("Mempool sizes:\t", ("%7i "*len(nodes)) % tuple([r['size'] for r in results]))
+    return [r['size'] for r in results]
+
+def sync_mempools(nodes, txperblock, log=0, loginterval=4):
+    mempools = check_mempools(allnodes, log-1)
+    finishmempools = startmempools = mempools
+    t1 = t2 = time.time()
+    onedone = False
+    i = 0
+    while any([pool < txperblock-100 for pool in mempools]):
+        i += 1
+        time.sleep(1)
+        mempools = check_mempools(allnodes, log-1 if not i%loginterval else 0)
+        if not onedone and any([pool >= txperblock-100 for pool in mempools]):
+            t2 = time.time()
+            finishmemools = mempools
+            onedone = True
+    t3 = time.time()
+    if log:
+        print("Mempool sync took %3.3f sec" % (t3-t1))
+        deltas = [r-s for r,s in zip(finishmemools, startmempools)]
+        print("Per-node ATMP tx/sec: " + ("%6.0f "*len(nodes)) % tuple([d/(t2-t1) for d in deltas]))
+        print("Average mempool sync rate: %6.0f tx/sec" % (sum(deltas)/(t2-t1)/len(deltas)))
 
 
 
@@ -195,33 +254,40 @@ try:
     for machine in machines:
         machine.info = machine.getcpuinfo()
         if 'cores' in machine.info:
-            num_nodes = machine.info['cores']
+            num_nodes = int(machine.info['cores'] / 2 + .5)
             print("%s has %i cores" %(str(machine), machine.info['cores']))
         else:
             num_nodes = 4
             print("Remote host didn't tell us how many cores it has. Assuming %i." % num_nodes)
-        machine.init_test(num_nodes)
+        machine.init_test(num_nodes, xthinner=1)
 
-    connect_round_robin(machines, chain=True)
+    connect_round_robin(machines, chain=False)
     for machine in machines:
         print("%50s connections:" % machine, [node.getconnectioncount() for node in machine.nodes])
     #print(json.dumps(machines[0].nodes[0].getpeerinfo()[0], indent=4, sort_keys=True))
     nodecount = sum([len(machine.nodes) for machine in machines])
-    txcount = 16800 // (nodecount-1)
-    spend_value = amount = make_utxos(machines[0].nodes[0], machines, int(txcount*1.2))
+    gen = machines[0].nodes[0]
+    allnodes = [node for machine in machines for node in machine.nodes]
+    spamnodes = [node for node in allnodes if not node == gen]
+    txperblock = 168000
+    txpernode = txperblock // (len(spamnodes))
+    spend_value = amount = make_utxos(gen, machines, int(txpernode*1.2))
 
-    for i in range(5):
+    for i in range(3):
         spend_value = str(Decimal((Decimal(spend_value) * 100000000 - 192)) / Decimal(1e8))
-        print(amount, spend_value)
-        generate_spam(machines[0].nodes[0], machines, spend_value, txcount, 1000)
-
         t0 = time.time()
-        machines[0].nodes[0].generate(1)
-        sync(machines, .1, 120.)
-        t1 = time.time()
-        print("Propagating block took %3.3f sec" % (t1-t0))
-        blk = machines[0].nodes[0].getblock(machines[0].nodes[0].getbestblockhash(), 1)
-        print("Block has %i transactions and is %i bytes" % (len(blk['tx']), blk['size']))
+        remote_spam(spamnodes, spend_value, txpernode, rate=180000/len(spamnodes))
+        t1 = time.time(); print("Generating spam took %3.3f sec" % (t1-t0))
+        sync_mempools(allnodes, txperblock, log=2)
+        t2 = time.time(); #print("Generating block...")
+        gen.generate(1)
+        t3 = time.time();  print("Generating block took %3.3f sec" % (t3-t2))
+
+        sync_nodes([gen] + spamnodes, timeout=120.)
+        t4 = time.time(); print("Propagating block took %3.3f sec" % (t4-t3))
+        blk = gen.getblock(gen.getbestblockhash(), 1)
+        print("Block has %ik tx and is %4.1f MB" % (int(len(blk['tx'])/1000+.5), blk['size']/1e6))
+        gen.generate(1) # clear mempool
 
 except:
     traceback.print_exc()

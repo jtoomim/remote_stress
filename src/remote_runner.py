@@ -79,6 +79,59 @@ def parse_config_and_options():
     # options.update(cli_options)
     return cli_options, config
 
+class SlaveNode(test_framework.test_node.TestNode):
+    def __init__(self, *args, **kwargs):
+        test_framework.test_node.TestNode.__init__(self, *args, **kwargs)
+        self.spamthread = None
+        self.spammer_enabled = False
+        self.spamprogress = 0
+        self.node_id = -1 # set by NodeManager
+
+    def start_spam_batch(self, value, txcount, addresses, rate=99999, batchsize=100, *args, **kwargs):
+        if self.spammer_enabled:
+            print("Tried to start a spammer that's already running!")
+            raise
+        self.spamthread = threading.Thread(target=self.spam_batch, args=(value, txcount, addresses, rate, batchsize, *args), kwargs=kwargs)
+        self.spamthread.start()
+        return
+
+    def stop_spam(self):
+        self.spammer_enabled = False
+        if self.spamthread:
+            self.spamthread.join()
+            self.spamthread = None
+
+    def get_spammer_status(self):
+        return self.spammer_enabled, self.spamprogress
+
+    def spam_batch(self, value, txcount, addresses, rate, batchsize, *args, **kwargs):
+        t = time.time()
+        self.spamprogress = 0
+        self.spammer_enabled = True
+        for i in range(0, txcount, batchsize):
+            if not self.spammer_enabled:
+                return
+            now = time.time()
+            self.spamprogress = i
+            if i/(now-t) > rate:
+                time.sleep(i/rate - (now-t))
+            if not (i%1000):
+                print("Node %2i\ttx %5i\tat %3.3f sec\t(%3.0f tx/sec)" % (self.node_id, i, time.time()-t, (i/(time.time()-t))))
+            add = addresses[i % len(addresses)]
+            try:
+                self.sendtoaddress(add, value, '', '', False, batchsize)
+            except http.client.CannotSendRequest: # hack to bypass lack of thread safety in http.client
+                self.sendtoaddress(add, value, '', '', False, batchsize)
+            except:
+                print("Node %i had a fatal error on tx %i:" % (self.node_id, i))
+                traceback.print_exc()
+                self.spammer_enabled = False
+                return
+        t1 = time.time(); print("Generating spam on %i took %3.3f sec for %i tx (total %4.0f tx/sec)" \
+            % (self.node_id, t1-t, txcount, txcount/(t1-t)))
+        self.spamprogress = txcount
+        self.spammer_enabled = False
+
 class ResourceManager:
     def __init__(self):
         if sys.platform == 'linux':
@@ -110,6 +163,7 @@ class ResourceManager:
         return True
 
 class NodeManager(BitcoinTestFramework):
+    NodeClass = SlaveNode
     def set_test_params(self, testname, num_nodes, start_chain=True, xthinner='1', options=None, config=None, *args, **kwargs):
         self.start_chain = start_chain
         self.setup_clean_chain = True
@@ -121,8 +175,8 @@ class NodeManager(BitcoinTestFramework):
         self.extra_args = [["-usexthinner=%s"%xthinner, 
                             "-blockmaxsize=32000000", 
                             "-checkmempool=0", 
-                            "-debug=net", 
-                            "-debug=mempool"]]* self.num_nodes
+                            "-debugexclude=net", 
+                            "-debugexclude=mempool"]]* self.num_nodes
 
 
         self.options.bitcoind = os.getenv("BITCOIND", 
@@ -146,21 +200,8 @@ class NodeManager(BitcoinTestFramework):
             BitcoinTestFramework.setup_chain(self)
     def setup_network(self):
         self.setup_nodes()
-
-    # def add_nodes(self, num_nodes, extra_args=None, rpchost=None, timewait=None, binary=None):
-    #     extra_confs = [[]] * num_nodes
-    #     if extra_args is None:
-    #         extra_args = [[]] * num_nodes
-    #     if binary is None:
-    #         binary = [self.options.bitcoind] * num_nodes
-    #     assert_equal(len(extra_confs), num_nodes)
-    #     assert_equal(len(extra_args), num_nodes)
-    #     assert_equal(len(binary), num_nodes)
-    #     for i in range(num_nodes):
-    #         self.nodes.append(TestNode(i, get_datadir_path(self.options.tmpdir, i), host=rpchost, rpc_port=rpc_port(i), p2p_port=p2p_port(i), timewait=timewait,
-    #                                    bitcoind=binary[i], bitcoin_cli=self.options.bitcoincli, mocktime=self.mocktime, coverage_dir=self.options.coveragedir, extra_conf=extra_confs[i], extra_args=extra_args[i], use_cli=self.options.usecli,
-    #                                    walletdir=get_datadir_path(self.options.walletdir, i) if self.options.walletdir else None))
-
+        for i in range(len(self.nodes)):
+            self.nodes[i].node_id = i
 
     def main(self):
 
@@ -274,8 +315,6 @@ def get_wan_ip(testname):
         traceback.print_exc()
         raise
 
-
-
 @method
 def get_node_p2p_ports(testname):
     try:
@@ -341,6 +380,14 @@ class TestHttpServer(BaseHTTPRequestHandler):
         return
 
 if __name__ == "__main__":
+    if not [arg for arg in sys.argv if arg.startswith('--walletdir')]:
+        print("\n\nThis test will be slow at generating transactions unless " +
+            "you have a very fast SSD or a ramdisk for the wallet files.\n" +
+            "It is strongly recommended to use a ramdisk for the wallets. You can set that "
+            "up on Linux with this:\n\n"
+            "sudo mount -t tmpfs size=2G /tmp/tmpfs/\n" +
+            "python3 remote_runner --walletdir=/tmp/tmpfs/test0\n\n\n")
+
     resman = ResourceManager()
     #serve()
     HTTPServer(("", resman.options.minport-1), TestHttpServer).serve_forever()

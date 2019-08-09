@@ -66,6 +66,8 @@ class BitcoinTestFramework():
 
     This class also contains various public and private helper methods."""
 
+    NodeClass = TestNode
+
     def __init__(self):
         """Sets test framework defaults. Do not override this method. Instead, override the set_test_params() method"""
         self.setup_clean_chain = False
@@ -73,6 +75,7 @@ class BitcoinTestFramework():
         self.mocktime = 0
         self.supports_cli = False
         self.bind_to_localhost_only = True
+
 
     def main(self):
         """Main function. This should not be overridden by the subclass test scripts."""
@@ -257,7 +260,7 @@ class BitcoinTestFramework():
         assert_equal(len(extra_args), num_nodes)
         assert_equal(len(binary), num_nodes)
         for i in range(num_nodes):
-            self.nodes.append(TestNode(i, get_datadir_path(self.options.tmpdir, i), host=rpchost, rpc_port=rpc_port(i), p2p_port=p2p_port(i), timewait=timewait,
+            self.nodes.append(self.NodeClass(i, get_datadir_path(self.options.tmpdir, i), host=rpchost, rpc_port=rpc_port(i), p2p_port=p2p_port(i), timewait=timewait,
                                        bitcoind=binary[i], bitcoin_cli=self.options.bitcoincli, mocktime=self.mocktime, coverage_dir=self.options.coveragedir, extra_conf=extra_confs[i], extra_args=extra_args[i], use_cli=self.options.usecli,
                                        walletdir=get_datadir_path(self.options.walletdir, i) if self.options.walletdir else None))
             if self.options.gravitonactivation:
@@ -408,7 +411,7 @@ class BitcoinTestFramework():
             for i in range(MAX_NODES):
                 datadir = initialize_datadir(self.options.cachedir, i)
                 if self.options.walletdir: initialize_walletdir(self.options.walletdir, i)
-                self.nodes.append(TestNode(i, get_datadir_path(self.options.cachedir, i), extra_conf=["bind=127.0.0.1"], extra_args=[], host=None, rpc_port=rpc_port(
+                self.nodes.append(self.NodeClass(i, get_datadir_path(self.options.cachedir, i), extra_conf=["bind=127.0.0.1"], extra_args=[], host=None, rpc_port=rpc_port(
                     i), p2p_port=p2p_port(i), timewait=None, bitcoind=self.options.bitcoind, bitcoin_cli=self.options.bitcoincli, mocktime=self.mocktime, coverage_dir=None))
                 self.nodes[i].clear_default_args()
                 self.nodes[i].extend_default_args([
